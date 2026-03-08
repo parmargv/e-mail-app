@@ -87,7 +87,7 @@ with st.sidebar:
         st.caption("ℹ️ Emails will be **moved**, not deleted.")
 
     st.markdown("---")
-    st.write("Design and develop by G.V.Parmar, A.V.P.T.I.Rajkot")
+    st.write("Design and Develop by Shri G.V.Parmar, A.V.P.T.I.Rajkot")
     st.markdown("---")
     # Quick setup guides
     with st.expander("📖 Setup Guide"):
