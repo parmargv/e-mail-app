@@ -4,8 +4,8 @@ import email
 import re
 from email.header import decode_header
 
-st.set_page_config(page_title="Multi Mail Cleaner", page_icon="🗑️", layout="wide")
-st.title("🗑️ Multi Mail Cleaner")
+st.set_page_config(page_title="Mail Manager", page_icon="🗑️", layout="wide")
+st.title("🗑️ Mail Manager")
 
 # ── Provider config ────────────────────────────────────────────────────────────
 PROVIDERS = {
@@ -48,17 +48,46 @@ PROVIDERS = {
     },
 }
 
+# ── Per-user session state initialisation ─────────────────────────────────────
+_DEFAULTS = {
+    "phase": "idle",
+    "uid_queue": [],
+    "total": 0,
+    "deleted": 0,
+    "failed": 0,
+    "log": [],
+    "permanent": False,
+    "spam_results": [],
+    "enable_move": False,
+    "move_folder": "",
+    "saved": 0,
+    "mode": "",
+    "senders": [],
+    "provider_name": "Gmail",
+    "user_email": "",
+    "user_password": "",
+    "mailbox": "INBOX",
+    "delete_permanently": False,
+    "enable_move_sidebar": False,
+    "move_folder_sidebar": "",
+}
+for _k, _v in _DEFAULTS.items():
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
+
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("📬 Email Provider")
     provider_name = st.selectbox(
         "Select your provider",
         list(PROVIDERS.keys()),
+        index=list(PROVIDERS.keys()).index(st.session_state.provider_name),
         format_func=lambda x: {
             "Gmail": "📧 Gmail",
             "Outlook / Hotmail": "💼 Outlook / Hotmail",
             "Yahoo Mail": "🟣 Yahoo Mail",
         }[x],
+        key="provider_name",
     )
     prov = PROVIDERS[provider_name]
 
@@ -66,30 +95,55 @@ with st.sidebar:
     st.header("🔐 Login")
     st.info(prov["help"], icon="ℹ️")
 
-    user_email = st.text_input("Email Address", placeholder=prov["placeholder_email"], key="email_input")
-    user_password = st.text_input("Password / App Password", type="password",
-                                  placeholder=prov["placeholder_pass"], key="pass_input")
+    user_email = st.text_input(
+        "Email Address",
+        value=st.session_state.user_email,
+        placeholder=prov["placeholder_email"],
+        key="user_email",
+    )
+    user_password = st.text_input(
+        "Password / App Password",
+        value=st.session_state.user_password,
+        type="password",
+        placeholder=prov["placeholder_pass"],
+        key="user_password",
+    )
 
     st.markdown("---")
-    mailbox = st.selectbox("Mailbox", prov["mailboxes"])
-    delete_permanently = st.checkbox("Permanently delete (skip Trash)", value=False)
+    mailbox = st.selectbox(
+        "Mailbox",
+        prov["mailboxes"],
+        index=prov["mailboxes"].index(st.session_state.mailbox)
+              if st.session_state.mailbox in prov["mailboxes"] else 0,
+        key="mailbox",
+    )
+    delete_permanently = st.checkbox(
+        "Permanently delete (skip Trash)",
+        value=st.session_state.delete_permanently,
+        key="delete_permanently",
+    )
 
     st.markdown("---")
     st.header("📁 Move to Folder")
-    enable_move = st.checkbox("Move emails instead of deleting", value=False)
+    enable_move = st.checkbox(
+        "Move emails instead of deleting",
+        value=st.session_state.enable_move_sidebar,
+        key="enable_move_sidebar",
+    )
     move_folder = ""
     if enable_move:
         move_folder = st.text_input(
             "Destination folder name",
+            value=st.session_state.move_folder_sidebar,
             placeholder="e.g. Archives, Newsletters, [Gmail]/Work",
             help="The folder will be created automatically if it doesn't exist.",
+            key="move_folder_sidebar",
         )
         st.caption("ℹ️ Emails will be **moved**, not deleted.")
 
     st.markdown("---")
     st.write("Design and Develop by Shri G.V.Parmar, A.V.P.T.I.Rajkot")
     st.markdown("---")
-    # Quick setup guides
     with st.expander("📖 Setup Guide"):
         if provider_name == "Gmail":
             st.markdown("""
@@ -196,13 +250,13 @@ Use the **🔍 Preview** button first — the **From** column shows the exact te
     st.markdown("#### ⚙️ Step 3 — Commercial detection settings")
     col_t3a, col_t3b = st.columns(2)
     with col_t3a:
-        t3_scan_limit   = st.number_input("Max emails to scan", min_value=50, max_value=5000, value=500, step=50, key="t3_limit")
-        t3_use_unsub    = st.checkbox("Flag emails with List-Unsubscribe header", value=True,  key="t3_unsub")
-        t3_use_subj     = st.checkbox("Flag by subject keywords",                 value=True,  key="t3_subj")
+        t3_scan_limit = st.number_input("Max emails to scan", min_value=50, max_value=5000, value=500, step=50, key="t3_limit")
+        t3_use_unsub  = st.checkbox("Flag emails with List-Unsubscribe header", value=True,  key="t3_unsub")
+        t3_use_subj   = st.checkbox("Flag by subject keywords",                 value=True,  key="t3_subj")
     with col_t3b:
-        t3_use_domain   = st.checkbox("Flag by sender domain/name keywords",      value=True,  key="t3_domain")
-        t3_custom_kw    = st.text_input("Extra subject keywords (comma-separated)",
-                                        placeholder="voucher, cashback, exclusive", key="t3_custom_kw")
+        t3_use_domain = st.checkbox("Flag by sender domain/name keywords",      value=True,  key="t3_domain")
+        t3_custom_kw  = st.text_input("Extra subject keywords (comma-separated)",
+                                      placeholder="voucher, cashback, exclusive", key="t3_custom_kw")
 
     st.markdown("---")
     col_p, col_r = st.columns(2)
@@ -223,15 +277,26 @@ DOMAIN_SPAM_KEYWORDS = [
     "offers", "promo", "promotions", "deals", "info@", "hello@",
     "news@", "updates@", "notifications@", "bulk", "mailer", "campaign",
     "email@", "mail@", "contact@", "nse_alerts@", "portfolio@portfolio",
-    "ebill@airtel.com", "credit_cards@", "estatement@","alerts@",
-    "customercare@icicibank.com","service@iciciprulife.com","creditcards@",
+    "ebill@airtel.com", "credit_cards@", "estatement@", "alerts@",
+    "customercare@icicibank.com", "service@iciciprulife.com", "creditcards@",
 ]
 
 # ── Core helpers ───────────────────────────────────────────────────────────────
+
+def _get_session_creds():
+    _prov = PROVIDERS[st.session_state.provider_name]
+    return (
+        _prov,
+        st.session_state.user_email,
+        st.session_state.user_password,
+        st.session_state.mailbox,
+    )
+
 def connect_imap():
-    imap = imaplib.IMAP4_SSL(prov["imap_host"], prov["imap_port"])
-    imap.login(user_email, user_password)
-    imap.select(f'"{mailbox}"')
+    _prov, _email, _password, _mailbox = _get_session_creds()
+    imap = imaplib.IMAP4_SSL(_prov["imap_host"], _prov["imap_port"])
+    imap.login(_email, _password)
+    imap.select(f'"{_mailbox}"')
     return imap
 
 def decode_str(value):
@@ -316,39 +381,20 @@ def scan_commercial(limit, use_unsub, use_subj, use_domain, extra_kw):
     return results
 
 def sender_matches_important(sender_raw, important_lower):
-    """
-    Match the decoded 'From' field against important sender terms.
-    Handles:
-      - Full email address:   boss@company.com
-      - Domain fragment:      @company.com  or  company.com
-      - Display name match:   ACPDC  →  "ACPDC Newsletter <info@acpdc.in>"
-      - Partial email match:  acpdc  →  info@acpdc.in
-    All comparisons are case-insensitive.
-    """
     raw = sender_raw.lower()
-    # Extract just the email address portion if present: "Name <email>"
     email_match = re.search(r'<([^>]+)>', raw)
     email_addr  = email_match.group(1) if email_match else raw
-
     for imp in important_lower:
         imp = imp.strip().strip('<>').strip()
         if not imp:
             continue
-        # Direct substring match on full From field (catches display name like "ACPDC")
         if imp in raw:
             return True
-        # Substring match on just the email address
         if imp in email_addr:
             return True
     return False
 
 def scan_smart_clean(limit, use_unsub, use_subj, use_domain, extra_kw, important_senders):
-    """
-    Scans emails and builds two lists:
-    - Important sender emails → always tagged 'save' (moved to safe folder), regardless of commercial flag
-    - Commercial emails from non-important senders → tagged 'delete'
-    Non-commercial emails from non-important senders are left untouched.
-    """
     imap = connect_imap()
     status, data = imap.uid("search", None, "ALL")
     if status != "OK" or not data[0]:
@@ -367,7 +413,6 @@ def scan_smart_clean(limit, use_unsub, use_subj, use_domain, extra_kw, important
         is_important = sender_matches_important(sender_raw, important_lower)
 
         if is_important:
-            # Always save important emails — regardless of commercial detection
             results.append({
                 "uid":     uid.decode(),
                 "from":    sender_raw,
@@ -377,7 +422,6 @@ def scan_smart_clean(limit, use_unsub, use_subj, use_domain, extra_kw, important
                 "action":  "💾 Save",
             })
         else:
-            # Only act on non-important emails if they're commercial
             flagged, reason = is_commercial(msg, use_unsub, use_subj, use_domain, extra_kw)
             if flagged:
                 results.append({
@@ -388,14 +432,14 @@ def scan_smart_clean(limit, use_unsub, use_subj, use_domain, extra_kw, important
                     "reason":  reason,
                     "action":  "🗑️ Delete",
                 })
-            # else: normal non-commercial email — skip, leave untouched
     imap.logout()
     return results
 
 def delete_one(uid_str, permanent):
-    imap = connect_imap()
-    uid  = uid_str.encode() if isinstance(uid_str, str) else uid_str
-    trash = prov["trash_folder"]
+    _prov, _, _, _ = _get_session_creds()
+    imap  = connect_imap()
+    uid   = uid_str.encode() if isinstance(uid_str, str) else uid_str
+    trash = _prov["trash_folder"]
     if permanent:
         imap.uid("store", uid, "+FLAGS", "\\Deleted")
         imap.expunge()
@@ -406,12 +450,10 @@ def delete_one(uid_str, permanent):
     imap.logout()
 
 def ensure_folder(imap, folder):
-    """Create folder if it doesn't already exist."""
     status, _ = imap.select(f'"{folder}"')
     if status != "OK":
         imap.create(f'"{folder}"')
-    # Re-select the original mailbox
-    imap.select(f'"{mailbox}"')
+    imap.select(f'"{st.session_state.mailbox}"')
 
 def move_one(uid_str, destination):
     imap = connect_imap()
@@ -422,28 +464,20 @@ def move_one(uid_str, destination):
     imap.expunge()
     imap.logout()
 
+# ── Validation helpers ─────────────────────────────────────────────────────────
+
 def validate_creds():
-    if not user_email or not user_password:
+    if not st.session_state.user_email or not st.session_state.user_password:
         st.error("Enter your email credentials in the sidebar.")
         return False
     return True
 
 def validate_senders():
-    senders = [s.strip() for s in sender_input.strip().splitlines() if s.strip()]
+    senders = [s.strip() for s in st.session_state.sender_input.strip().splitlines() if s.strip()]
     if not senders:
         st.error("Enter at least one sender address.")
         return None
     return senders
-
-# ── Session state ──────────────────────────────────────────────────────────────
-for key, default in {
-    "phase": "idle", "uid_queue": [], "total": 0,
-    "deleted": 0, "failed": 0, "log": [], "permanent": False,
-    "spam_results": [], "enable_move": False, "move_folder": "",
-    "saved": 0,
-}.items():
-    if key not in st.session_state:
-        st.session_state[key] = default
 
 # ── Tab 1 actions ──────────────────────────────────────────────────────────────
 if preview_btn:
@@ -458,7 +492,7 @@ if preview_btn:
                     st.stop()
             if rows:
                 st.success(f"Found **{len(rows)}** email(s).")
-                st.dataframe(rows, use_container_width=True, hide_index=True)
+                st.dataframe(rows, width="stretch", hide_index=True)
             else:
                 st.info("No emails found from those senders.")
 
@@ -489,7 +523,7 @@ if spam_preview_btn:
                 st.stop()
         if results:
             st.success(f"Found **{len(results)}** commercial email(s).")
-            st.dataframe(results, use_container_width=True, hide_index=True)
+            st.dataframe(results, width="stretch", hide_index=True)
         else:
             st.info("No commercial emails detected with current settings.")
 
@@ -546,9 +580,8 @@ if t3_preview_btn:
                 f"💾 **{save_count}** will be saved to `{t3_safe_folder}`, "
                 f"🗑️ **{delete_count}** will be deleted."
             )
-            st.dataframe(results, use_container_width=True, hide_index=True)
+            st.dataframe(results, width="stretch", hide_index=True)
 
-            # ── Debug: show exact From values to help user know what to type ──
             with st.expander("🔬 Debug — exact 'From' values (copy to use as important sender)", expanded=save_count == 0):
                 st.caption("These are the exact decoded From fields. Copy any part (name or email address) into Step 1.")
                 unique_froms = sorted({r["from"] for r in results})
@@ -583,7 +616,7 @@ if t3_run_btn:
             st.session_state.log         = []
             st.rerun()
 
-
+# ── Scanning phase ─────────────────────────────────────────────────────────────
 if st.session_state.phase == "scanning" and st.session_state.get("mode") == "sender":
     st.info("📡 Scanning mailbox...")
     with st.spinner("Searching..."):
@@ -674,8 +707,8 @@ if st.session_state.phase == "done":
     st.markdown("### 🏁 Complete!")
 
     if is_smart_done:
-        saved_count  = st.session_state.get("saved", 0)
-        del_count    = st.session_state.deleted - saved_count
+        saved_count = st.session_state.get("saved", 0)
+        del_count   = st.session_state.deleted - saved_count
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("🗑️ Deleted",        del_count)
         c2.metric("💾 Saved",           saved_count)
@@ -692,11 +725,15 @@ if st.session_state.phase == "done":
                 f"**{st.session_state.failed}** failed."
             )
     else:
-        action_label = f"moved to **{st.session_state.move_folder}**" if st.session_state.enable_move and st.session_state.move_folder else "removed"
+        action_label = (
+            f"moved to **{st.session_state.move_folder}**"
+            if st.session_state.enable_move and st.session_state.move_folder
+            else "removed"
+        )
         c1, c2, c3 = st.columns(3)
-        c1.metric("✅ Processed",        st.session_state.deleted)
-        c2.metric("❌ Failed",           st.session_state.failed)
-        c3.metric("📋 Total processed",  st.session_state.total)
+        c1.metric("✅ Processed",       st.session_state.deleted)
+        c2.metric("❌ Failed",          st.session_state.failed)
+        c3.metric("📋 Total processed", st.session_state.total)
         if st.session_state.failed == 0:
             st.success(f"🎉 All **{st.session_state.deleted}** email(s) {action_label} successfully!")
         else:
@@ -718,4 +755,3 @@ imap_info = {
     "Yahoo Mail":        "imap.mail.yahoo.com:993",
 }
 st.caption(f"Connected via {imap_info[provider_name]}. Credentials are never stored.")
-
