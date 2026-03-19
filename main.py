@@ -70,6 +70,8 @@ _DEFAULTS = {
     "delete_permanently": False,
     "enable_move_sidebar": False,
     "move_folder_sidebar": "",
+    "unsub_rows": [],
+    "unsub_scanned": False,
 }
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
@@ -174,7 +176,7 @@ with st.sidebar:
             """)
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs(["🎯 By Sender Address", "🛒 Commercial / Spam Filter", "🛡️ Smart Clean & Save"])
+tab1, tab2, tab3, tab4 = st.tabs(["🎯 By Sender Address", "🛒 Commercial / Spam Filter", "🛡️ Smart Clean & Save", "📧 Unsubscribe"])
 
 with tab1:
     st.subheader("Delete emails from specific addresses")
@@ -262,6 +264,25 @@ Use the **🔍 Preview** button first — the **From** column shows the exact te
     col_p, col_r = st.columns(2)
     t3_preview_btn = col_p.button("🔍 Preview (show what will happen)", use_container_width=True, key="t3_prev")
     t3_run_btn     = col_r.button("🚀 Run Smart Clean", use_container_width=True, type="primary", key="t3_run")
+
+with tab4:
+    st.subheader("📧 Unsubscribe from Mailing Lists")
+    st.markdown(
+        "Enter one or more sender email addresses below. "
+        "The app will scan your inbox for emails from those senders that contain a "
+        "**List-Unsubscribe** header and attempt to unsubscribe via the mailto or HTTP link found in the header."
+    )
+
+    unsub_input = st.text_area(
+        "Sender email addresses to unsubscribe from (one per line)",
+        placeholder="newsletter@company.com\noffers@shop.com",
+        height=130,
+        key="unsub_input",
+    )
+
+    col_u1, col_u2 = st.columns(2)
+    unsub_preview_btn = col_u1.button("🔍 Find Unsubscribe Links", use_container_width=True, key="unsub_prev")
+    unsub_run_btn     = col_u2.button("🚀 Unsubscribe All",        use_container_width=True, type="primary", key="unsub_run")
 
 # ── Keyword lists ──────────────────────────────────────────────────────────────
 SUBJECT_SPAM_KEYWORDS = [
@@ -464,6 +485,112 @@ def move_one(uid_str, destination):
     imap.expunge()
     imap.logout()
 
+def fetch_unsubscribe_links(senders):
+    """Scan emails from the given senders and return rows with List-Unsubscribe links."""
+    import re as _re
+    imap = connect_imap()
+    rows = []
+    seen_links = set()
+    for sender in senders:
+        status, data = imap.uid("search", None, f'FROM "{sender}"')
+        if status != "OK" or not data[0]:
+            continue
+        for uid in data[0].split():
+            s, d = imap.uid("fetch", uid, "(BODY.PEEK[HEADER])")
+            if s != "OK":
+                continue
+            msg        = email.message_from_bytes(d[0][1])
+            raw_header = msg.get("List-Unsubscribe", "")
+            if not raw_header:
+                continue
+            links = _re.findall(r'<([^>]+)>', raw_header)
+            chosen = None
+            for lnk in links:
+                lnk = lnk.strip()
+                if lnk.startswith("http") or lnk.startswith("mailto:"):
+                    chosen = lnk
+                    break
+            if chosen and chosen not in seen_links:
+                seen_links.add(chosen)
+                rows.append({
+                    "uid":     uid.decode(),
+                    "from":    decode_str(msg.get("From",    "")),
+                    "subject": decode_str(msg.get("Subject", "(no subject)")),
+                    "date":    msg.get("Date", ""),
+                    "link":    chosen,
+                })
+    imap.logout()
+    return rows
+
+def _mx_exists(domain):
+    """Return True if the domain has at least one MX (or A) record."""
+    import socket as _socket
+    try:
+        # Use getaddrinfo as a lightweight DNS check (no extra deps needed)
+        _socket.getaddrinfo(domain, None)
+        return True
+    except _socket.gaierror:
+        return False
+
+def attempt_unsubscribe(link, sender_label):
+    """Try to unsubscribe via the given link. Returns (success: bool, message: str)."""
+    import urllib.request as _req
+    import smtplib as _smtp
+    import urllib.parse as _parse
+
+    if link.startswith("mailto:"):
+        parsed   = _parse.urlparse(link)
+        to_addr  = parsed.path.strip()
+        params   = dict(_parse.parse_qsl(parsed.query))
+        subject  = params.get("subject", "Unsubscribe")
+        body     = params.get("body",    "Please unsubscribe me from this mailing list.")
+
+        # ── DNS pre-check: skip send if domain is unresolvable ─────────────────
+        to_domain = to_addr.split("@")[-1] if "@" in to_addr else ""
+        if to_domain and not _mx_exists(to_domain):
+            return False, (
+                f"Skipped — domain `{to_domain}` has no DNS record. "
+                "This unsubscribe address is defunct; try unsubscribing via the sender's website."
+            )
+
+        _prov, _email, _password, _ = _get_session_creds()
+        smtp_configs = {
+            "Gmail":             ("smtp.gmail.com", 587),
+            "Outlook / Hotmail": ("smtp.office365.com", 587),
+            "Yahoo Mail":        ("smtp.mail.yahoo.com", 587),
+        }
+        host, port = smtp_configs.get(st.session_state.provider_name, ("smtp.gmail.com", 587))
+        try:
+            msg_text = (
+                f"From: {_email}\r\nTo: {to_addr}\r\nSubject: {subject}\r\n\r\n{body}"
+            )
+            server = _smtp.SMTP(host, port, timeout=10)
+            server.starttls()
+            server.login(_email, _password)
+            server.sendmail(_email, [to_addr], msg_text)
+            server.quit()
+            return True, f"Sent unsubscribe email to `{to_addr}`"
+        except Exception as ex:
+            return False, f"mailto send failed: {ex}"
+
+    elif link.startswith("http"):
+        try:
+            req = _req.Request(
+                link,
+                headers={"User-Agent": "Mozilla/5.0 (Unsubscribe request)"},
+            )
+            with _req.urlopen(req, timeout=10) as resp:
+                code = resp.getcode()
+            if code == 200:
+                return True, f"HTTP GET succeeded (200) -> `{link[:60]}...`"
+            else:
+                return False, f"HTTP GET returned status {code}"
+        except Exception as ex:
+            return False, f"HTTP GET failed: {ex}"
+
+    return False, "No usable unsubscribe link found"
+
+
 # ── Validation helpers ─────────────────────────────────────────────────────────
 
 def validate_creds():
@@ -615,6 +742,68 @@ if t3_run_btn:
             st.session_state.failed      = 0
             st.session_state.log         = []
             st.rerun()
+
+
+# ── Tab 4 actions ──────────────────────────────────────────────────────────────
+
+# Phase 1: Preview — scan and store results in session state
+if unsub_preview_btn:
+    if validate_creds():
+        raw_senders = [s.strip() for s in st.session_state.unsub_input.strip().splitlines() if s.strip()]
+        if not raw_senders:
+            st.error("Please enter at least one sender address.")
+        else:
+            with st.spinner("Scanning for List-Unsubscribe headers..."):
+                try:
+                    unsub_rows = fetch_unsubscribe_links(raw_senders)
+                except Exception as e:
+                    st.error(f"Connection error: {e}")
+                    st.stop()
+            st.session_state.unsub_rows    = unsub_rows
+            st.session_state.unsub_scanned = True
+            if not unsub_rows:
+                st.info("No emails with List-Unsubscribe headers found for those senders.")
+            else:
+                st.success(f"Found **{len(unsub_rows)}** email(s) with unsubscribe links. Click **🚀 Unsubscribe All** to proceed.")
+                st.dataframe(
+                    [{"from": r["from"], "subject": r["subject"], "date": r["date"], "unsubscribe_link": r["link"]} for r in unsub_rows],
+                    width="stretch", hide_index=True,
+                )
+
+# Phase 2: Unsubscribe — use stored results, do NOT re-scan
+if unsub_run_btn:
+    if validate_creds():
+        if not st.session_state.get("unsub_scanned") or not st.session_state.unsub_rows:
+            st.warning("Please click **🔍 Find Unsubscribe Links** first to scan for emails before unsubscribing.")
+        else:
+            unsub_rows = st.session_state.unsub_rows
+            st.markdown("### ⚙️ Unsubscribing...")
+            success_count, fail_count = 0, 0
+            log_lines = []
+            prog = st.progress(0)
+            for i, row in enumerate(unsub_rows):
+                ok, msg = attempt_unsubscribe(row["link"], row["from"])
+                if ok:
+                    success_count += 1
+                    log_lines.append(f"✅ **{row['from']}** — {msg}")
+                else:
+                    fail_count += 1
+                    log_lines.append(f"❌ **{row['from']}** — {msg}")
+                prog.progress((i + 1) / len(unsub_rows))
+
+            if success_count:
+                st.success(f"🎉 Unsubscribed from **{success_count}** sender(s).")
+            if fail_count:
+                st.warning(
+                    f"**{fail_count}** sender(s) could not be unsubscribed automatically. "
+                    "You may need to visit their unsubscribe link manually."
+                )
+            with st.expander("📋 Unsubscribe Log", expanded=True):
+                for line in log_lines:
+                    st.markdown(line)
+            # Clear stored results so a fresh scan is needed next time
+            st.session_state.unsub_rows    = []
+            st.session_state.unsub_scanned = False
 
 # ── Scanning phase ─────────────────────────────────────────────────────────────
 if st.session_state.phase == "scanning" and st.session_state.get("mode") == "sender":
